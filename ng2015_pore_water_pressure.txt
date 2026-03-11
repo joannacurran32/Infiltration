@@ -1,0 +1,626 @@
+"""
+Steady-State Pore Water Pressure in a Vegetated Unsaturated Infinite Slope
+===========================================================================
+Implements Ng et al. (2015) Eq. (19):
+
+    uw = (gamma_w / alpha) * ln(k0*)
+
+where the steady-state relative permeability k0* is (Eq. 17):
+
+    k0* = exp[alpha*(psi_0 - z*)]
+          + (q0/ks) * [exp(-alpha*z*) - 1]
+          + (alpha / (ks*cos²(phi)))
+            * INT_{L1*}^{L*} G(z*, x*) * S(x*/cos(phi)) dx*
+
+    Term 1: Hydrostatic pore-water pressure from water table
+    Term 2: Effect of steady-state surface flux
+    Term 3: Effect of root water uptake (vegetation)
+
+Reference
+---------
+    Ng, C.W.W., Ni, J.J., Leung, A.K., Wang, Z.J. (2015).
+    Analytical solutions for calculating pore-water pressure in an infinite
+    unsaturated slope with different root architectures.
+    Can. Geotech. J. 52(12):1980–1993. doi:10.1139/cgj-2014-0537
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INPUT VARIABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SOIL PROPERTIES
+    ks      Saturated hydraulic conductivity             [m/s]
+            Typical CDG silty sand: 2.2e-6 m/s
+            Typical fine sand:      2.7e-4 m/s
+            Typical silt:           9.0e-7 m/s
+
+    alpha   Gardner (1958) desaturation coefficient      [1/m]
+            Controls how quickly permeability drops with suction.
+            Typical CDG: 1.1 m⁻¹  (from k = ks * exp(alpha * psi), Eq. 5)
+
+GEOMETRY
+    phi_deg Slope angle                                  [degrees]
+            Converted to radians internally. Typical: 40°.
+            Note: cos(phi) links perpendicular depth z' to vertical depth H.
+
+    H0      Vertical depth from slope surface to water table  [m]
+            Sets L* = H0 (total z* depth of slope profile).
+
+    L1_vert Vertical depth of the NON-rooted zone        [m]
+            Measured downward from slope surface to the base of root zone.
+            Equivalent to H0 minus the root depth.
+            In z* coordinates: L1* = L1_vert  (z* equals vertical depth).
+
+    L2_vert Vertical depth (thickness) of the root zone  [m]
+            Measured from the base of the root zone to the slope surface.
+            In z* coordinates: L2* = L2_vert.
+            In perpendicular coordinates: L2' = L2_vert / cos(phi).
+            Note: L1_vert + L2_vert must equal H0.
+
+BOUNDARY CONDITIONS
+    psi_0   Pressure head at the BOTTOM boundary (water table)  [m]
+            For a free water table: psi_0 = 0.
+            Non-zero values represent an artesian or perched condition.
+
+    q0      Steady-state surface flux                    [m/s]
+            Positive = downward (rainfall/infiltration).
+            Negative = upward (evaporation).
+            Zero = no-flux (drying/steady-state without rain), the most
+                   common choice for studying the vegetation-only effect.
+
+VEGETATION
+    T       Transpiration rate                           [m/s]
+            Volumetric flux of water extracted by roots per unit slope area.
+            Convert from mm/day: T = value_mm_day * 1e-3 / 86400.
+            Typical value: 6.6 mm/day = 7.64e-8 m/s.
+            IMPORTANT: must satisfy T/ks << 1 for the linearized Gardner
+            model to remain valid (see numerical note below).
+
+    architecture
+            Root architecture type                       [string]
+            One of: 'triangular', 'parabolic', 'uniform', 'exponential'
+            Triangular: density increases linearly from root zone base to surface.
+            Parabolic:  density is zero at both ends, maximum at mid-depth.
+
+FLUID PROPERTIES
+    gamma_w Unit weight of water                         [kN/m³]
+            Default: 10.0  (exact value sometimes used: 9.81)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COORDINATE SYSTEM  (Fig. 3, Ng et al. 2015)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    z'  perpendicular depth from water table upward to slope surface  [m]
+    z*  = z' * cos(phi)  — the transformed depth used in all equations [m]
+
+    z* = 0     →  water table  (k0* = 1, uw = 0)
+    z* = L*    →  slope surface  (maximum suction)
+
+    L*  = H0               (total z* depth = vertical depth to water table)
+    L1* = L1_vert          (z* at base of root zone)
+    L2* = L2_vert          (z* thickness of root zone)
+    Note: L1* + L2* = L*,  so L1_vert + L2_vert = H0
+
+    Perpendicular equivalents:
+    L1' = L1* / cos(phi) = L1_vert / cos(phi)
+    L2' = L2* / cos(phi) = L2_vert / cos(phi)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NUMERICAL NOTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    The Green function (Eq. 18) contains exp(alpha*x*) terms. When
+    alpha*L* is large (e.g., alpha=1.1, L*=5 → exp(alpha*L*)≈245) and
+    T/ks is not negligibly small, the root uptake term can exceed the
+    hydrostatic term, making k0* ≤ 0. This is a known limitation of the
+    linearized Gardner model. The code returns np.nan at affected depths
+    and issues a warning. To avoid this:
+       - Reduce T  (or check that T/ks < ~0.005 for CDG with L*=5 m)
+       - Use a shallower slope (smaller H0)
+       - Use a soil with smaller alpha*H0 product
+"""
+
+import numpy as np
+from scipy.integrate import quad
+import matplotlib.pyplot as plt
+import warnings
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SINK TERM  S(z')  —  Eq. (4)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def S_triangular(z_perp, L1_perp, L2_perp, T):
+    """
+    Triangular root architecture sink term  [1/s]  —  Eq. (4), Ng et al. (2015).
+
+        S(z') = 2T * (z' - L1') / L2'^2    inside root zone  [L1', L1'+L2']
+        S(z') = 0                           outside root zone
+
+    Root water uptake density increases linearly from zero at the base of
+    the root zone (z' = L1') to a maximum at the slope surface (z' = L1'+L2').
+    Integral: ∫ S dz' = T  ✓
+
+    Parameters
+    ----------
+    z_perp  : float or array, perpendicular depth from water table z' [m]
+    L1_perp : float, perpendicular depth of the non-rooted zone L1'   [m]
+    L2_perp : float, perpendicular thickness of the root zone L2'     [m]
+    T       : float, transpiration rate                                [m/s]
+
+    Returns
+    -------
+    S : float or array  [1/s]
+    """
+    z_perp = np.asarray(z_perp, dtype=float)
+    inside = (z_perp >= L1_perp) & (z_perp <= L1_perp + L2_perp)
+    S = np.zeros_like(z_perp)
+    u = np.where(inside, z_perp - L1_perp, 0.0)
+    S = np.where(inside, 2.0 * T * u / L2_perp**2, 0.0)
+    return float(S) if S.ndim == 0 else S
+
+
+def S_parabolic(z_perp, L1_perp, L2_perp, T):
+    """
+    Parabolic root architecture sink term  [1/s]  —  Eq. (4), Ng et al. (2015).
+
+        S(z') = 6T * (z'-L1') * (L2'-(z'-L1')) / L2'^3   inside root zone
+        S(z') = 0                                          outside root zone
+
+    Root water uptake density follows a parabolic profile — zero at both the
+    root zone base and the slope surface, maximum at mid-depth (Leung et al. 2015).
+    Integral: ∫ S dz' = T  ✓
+
+    Parameters
+    ----------
+    z_perp  : float or array, perpendicular depth from water table z' [m]
+    L1_perp : float, perpendicular depth of the non-rooted zone L1'   [m]
+    L2_perp : float, perpendicular thickness of the root zone L2'     [m]
+    T       : float, transpiration rate                                [m/s]
+
+    Returns
+    -------
+    S : float or array  [1/s]
+    """
+    z_perp = np.asarray(z_perp, dtype=float)
+    inside = (z_perp >= L1_perp) & (z_perp <= L1_perp + L2_perp)
+    u = np.where(inside, z_perp - L1_perp, 0.0)
+    S = np.where(inside, 6.0 * T * u * (L2_perp - u) / L2_perp**3, 0.0)
+    return float(S) if S.ndim == 0 else S
+
+
+def S_uniform(z_perp, L1_perp, L2_perp, T):
+    """
+    Uniform root architecture sink term  [1/s]  —  Eq. (4), Ng et al. (2015).
+
+        S(z') = T / L2'   inside root zone
+        S(z') = 0         outside root zone
+
+    Integral: ∫ S dz' = T  ✓
+    """
+    z_perp = np.asarray(z_perp, dtype=float)
+    inside = (z_perp >= L1_perp) & (z_perp <= L1_perp + L2_perp)
+    S = np.where(inside, T / L2_perp, 0.0)
+    return float(S) if S.ndim == 0 else S
+
+
+def S_exponential(z_perp, L1_perp, L2_perp, T):
+    """
+    Exponential root architecture sink term  [1/s]  —  Eq. (4), Ng et al. (2015).
+
+        S(z') = T * (exp(z'-L1') - 1) / (exp(L2') - L2' - 1)   inside root zone
+        S(z') = 0                                                 outside root zone
+
+    Integral: ∫ S dz' = T  ✓  (Raats 1974)
+    """
+    z_perp = np.asarray(z_perp, dtype=float)
+    inside = (z_perp >= L1_perp) & (z_perp <= L1_perp + L2_perp)
+    denom = np.exp(L2_perp) - L2_perp - 1.0
+    u = np.where(inside, z_perp - L1_perp, 0.0)
+    S = np.where(inside, T * (np.exp(u) - 1.0) / denom, 0.0)
+    return float(S) if S.ndim == 0 else S
+
+
+SINK_FUNCTIONS = {
+    "triangular":  S_triangular,
+    "parabolic":   S_parabolic,
+    "uniform":     S_uniform,
+    "exponential": S_exponential,
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GREEN FUNCTION  G(z*, x*)  —  Eq. (18)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def green_function(z_star, x_star, alpha):
+    """
+    Green function G(z*, x*)  —  Ng et al. (2015) Eq. (18).
+
+    For the ODE  d²k*/dz*² + alpha * dk*/dz* = delta(z* - x*)
+    with boundary conditions k*(0) = exp(alpha*psi_0) and
+    (dk*/dz* + alpha*k*)|_{z*=L*} = -alpha*q0*:
+
+        G = exp(-alpha*z*) * (1 - exp(alpha*x*)) / alpha   if x* <= z*
+        G = (exp(-alpha*z*) - 1) / alpha                   if x* >  z*
+
+    G is always ≤ 0: root uptake always reduces k0* relative to no-vegetation.
+
+    Parameters
+    ----------
+    z_star  : float, evaluation depth in z* coordinate [m]
+    x_star  : float, source (integration variable) depth in z* coordinate [m]
+    alpha   : float, Gardner desaturation coefficient [1/m]
+
+    Returns
+    -------
+    float
+    """
+    if x_star <= z_star:
+        return np.exp(-alpha * z_star) * (1.0 - np.exp(alpha * x_star)) / alpha
+    else:
+        return (np.exp(-alpha * z_star) - 1.0) / alpha
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ROOT UPTAKE INTEGRAL  (Term 3 of Eq. 19)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def root_uptake_term(z_star, L1_star, L2_star, alpha, phi, ks, T, architecture):
+    """
+    Evaluates the root water uptake contribution to k0* (Term 3 of Eq. 17/19):
+
+        (alpha / (ks * cos²(phi))) * ∫_{L1*}^{L*} G(z*, x*) * S(x*/cos(phi)) dx*
+
+    The Heaviside function H in Eq. (17) is absorbed by using [L1*, L*] as
+    integration limits rather than [0, L*].
+
+    Parameters
+    ----------
+    z_star       : float, evaluation depth z* [m]
+    L1_star      : float, z* at base of root zone = L1_vert  [m]
+    L2_star      : float, z* thickness of root zone = L2_vert [m]
+    alpha        : float, Gardner desaturation coefficient [1/m]
+    phi          : float, slope angle [radians]
+    ks           : float, saturated hydraulic conductivity [m/s]
+    T            : float, transpiration rate [m/s]
+    architecture : str, one of 'triangular', 'parabolic', 'uniform', 'exponential'
+
+    Returns
+    -------
+    float : dimensionless contribution to k0* (typically ≤ 0)
+    """
+    cos_phi = np.cos(phi)
+
+    # Convert z* integration limits to perpendicular depth for sink function
+    L1_perp = L1_star / cos_phi     # L1' = L1* / cos(phi)
+    L2_perp = L2_star / cos_phi     # L2' = L2* / cos(phi)
+
+    sink_fn = SINK_FUNCTIONS[architecture]
+
+    def integrand(x_star):
+        x_perp = x_star / cos_phi   # x' = x* / cos(phi) — Eq. (17): S(x*/cos(phi))
+        G = green_function(z_star, x_star, alpha)
+        S = sink_fn(x_perp, L1_perp, L2_perp, T)
+        return G * S
+
+    x_low  = L1_star
+    x_high = L1_star + L2_star      # = L* (slope surface in z* coordinates)
+
+    val, _ = quad(integrand, x_low, x_high, limit=300, epsabs=1e-14, epsrel=1e-10)
+
+    return (alpha / (ks * cos_phi**2)) * val
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PORE WATER PRESSURE  uw(z*)  —  Eq. (19)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def pore_water_pressure_eq19(z_star, H0, L1_vert, L2_vert,
+                              alpha, psi_0, q0, ks, phi, T,
+                              architecture="triangular",
+                              gamma_w=10.0):
+    """
+    Steady-state pore water pressure uw [kPa] at depth z* — Ng et al. (2015) Eq. (19).
+
+        uw = (gamma_w / alpha) * ln(k0*)
+
+    k0* is the steady-state relative permeability at z*, composed of three terms:
+
+        k0* = exp[alpha*(psi_0 - z*)]              [Term 1: hydrostatic]
+            + (q0/ks) * [exp(-alpha*z*) - 1]       [Term 2: surface flux]
+            + root_uptake_term(...)                 [Term 3: root water uptake]
+
+    Parameters
+    ----------
+    z_star       : float or array-like
+                   Depth in z* coordinates [m].
+                   z* = 0 at the water table; z* = H0 at the slope surface.
+
+    H0           : float
+                   Vertical depth from slope surface to water table [m].
+                   Sets L* = H0 (since z* = vertical depth for a slope).
+
+    L1_vert      : float
+                   Vertical depth of the NON-rooted zone [m], measured from
+                   the slope surface down to the base of the root zone.
+                   In z* space: L1* = L1_vert.
+                   Constraint: L1_vert + L2_vert = H0.
+
+    L2_vert      : float
+                   Vertical thickness of the root zone [m], measured from
+                   base of root zone to slope surface.
+                   In z* space: L2* = L2_vert.
+                   In perpendicular space: L2' = L2_vert / cos(phi).
+
+    alpha        : float
+                   Gardner desaturation coefficient [1/m] (Eq. 5: k = ks*exp(alpha*psi)).
+
+    psi_0        : float
+                   Pressure head at the water table boundary [m].
+                   Use psi_0 = 0 for a free water table at atmospheric pressure.
+
+    q0           : float
+                   Steady-state surface flux [m/s].
+                   q0 = 0  → no-flux (drying condition without rain).
+                   q0 > 0  → downward flux (steady rainfall or infiltration).
+                   q0 < 0  → upward flux (evaporation).
+
+    ks           : float
+                   Saturated hydraulic conductivity [m/s].
+
+    phi          : float
+                   Slope angle [radians]. Use np.radians(degrees) to convert.
+
+    T            : float
+                   Transpiration rate [m/s].
+                   T = 0 returns the no-vegetation (bare slope) solution.
+                   For validity: T / ks should be much less than ~0.005
+                   when alpha * H0 is large (e.g., alpha=1.1, H0=5 m).
+
+    architecture : str, optional
+                   Root architecture type: 'triangular', 'parabolic',
+                   'uniform', or 'exponential'. Default: 'triangular'.
+
+    gamma_w      : float, optional
+                   Unit weight of water [kN/m³]. Default: 10.0.
+
+    Returns
+    -------
+    uw : float or ndarray  [kPa]
+         Negative values = suction (unsaturated zone above water table).
+         np.nan is returned at depths where k0* ≤ 0 (model breakdown).
+    """
+    # Set z* geometry
+    L_star  = H0         # total z* depth = vertical depth to water table
+    L1_star = L1_vert    # z* at base of root zone (= L* - L2*)
+    L2_star = L2_vert    # z* thickness of root zone
+
+    scalar_input = np.ndim(z_star) == 0
+    z_arr  = np.atleast_1d(np.asarray(z_star, dtype=float))
+    uw_arr = np.full_like(z_arr, np.nan)
+
+    for i, zs in enumerate(z_arr):
+        # --- Term 1: hydrostatic pore-water pressure from water table ---
+        term1 = np.exp(alpha * (psi_0 - zs))
+
+        # --- Term 2: effect of steady-state surface flux ---
+        term2 = (q0 / ks) * (np.exp(-alpha * zs) - 1.0)
+
+        # --- Term 3: effect of root water uptake ---
+        term3 = root_uptake_term(zs, L1_star, L2_star, alpha, phi, ks, T,
+                                  architecture) if T != 0.0 else 0.0
+
+        k0_star = term1 + term2 + term3
+
+        if k0_star <= 0.0:
+            warnings.warn(
+                f"k0* = {k0_star:.3e} ≤ 0 at z* = {zs:.3f} m "
+                f"(T/ks = {T/ks:.5f}, architecture = '{architecture}'). "
+                "Linearized Gardner model invalid here — reduce T. "
+                "Returning NaN.",
+                RuntimeWarning, stacklevel=2
+            )
+        else:
+            uw_arr[i] = (gamma_w / alpha) * np.log(k0_star)
+
+    return float(uw_arr[0]) if scalar_input else uw_arr
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PROFILE HELPER
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_uw_profile(H0, L1_vert, L2_vert, alpha, psi_0, q0, ks, phi, T,
+                       architecture="triangular", gamma_w=10.0, n_points=100):
+    """
+    Compute uw at n_points evenly spaced from water table to slope surface.
+
+    Returns
+    -------
+    z_star        : ndarray  [m]   z* coordinate (0 = water table)
+    uw            : ndarray  [kPa] pore water pressure
+    depth_surface : ndarray  [m]   vertical depth from slope surface (= H0 - z*)
+    """
+    z_arr = np.linspace(0.0, H0, n_points)
+    uw_arr = pore_water_pressure_eq19(
+        z_arr, H0, L1_vert, L2_vert, alpha, psi_0, q0, ks, phi, T,
+        architecture, gamma_w
+    )
+    return z_arr, uw_arr, H0 - z_arr
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PLOT
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_profiles(H0, L1_vert, L2_vert, alpha, psi_0, q0, ks, phi, T,
+                  architectures=("triangular", "parabolic"),
+                  gamma_w=10.0, n_points=100):
+    """
+    Plot uw vs vertical depth from surface for the selected architectures
+    plus the no-vegetation baseline.
+    """
+    colors = {"triangular": "darkorange", "parabolic": "steelblue",
+              "uniform": "forestgreen", "exponential": "crimson"}
+
+    fig, ax = plt.subplots(figsize=(7, 9))
+
+    # No-vegetation baseline (T = 0)
+    _, uw_noveg, depth = compute_uw_profile(
+        H0, L1_vert, L2_vert, alpha, psi_0, q0, ks, phi, T=0.0,
+        architecture="triangular", gamma_w=gamma_w, n_points=n_points
+    )
+    ax.plot(uw_noveg, depth, "k--", linewidth=1.8,
+            label="No vegetation  ($T = 0$)")
+
+    for arch in architectures:
+        _, uw_arr, dep = compute_uw_profile(
+            H0, L1_vert, L2_vert, alpha, psi_0, q0, ks, phi, T,
+            architecture=arch, gamma_w=gamma_w, n_points=n_points
+        )
+        ax.plot(uw_arr, dep,
+                color=colors.get(arch, "gray"),
+                linewidth=2.5,
+                label=arch.capitalize())
+
+    # Shade root zone
+    ax.axhspan(0.0, L2_vert, alpha=0.12, color="green",
+               label=f"Root zone  (0 – {L2_vert*100:.0f} cm from surface)")
+    ax.axhline(L2_vert, color="green", linestyle="--", linewidth=1.0)
+    ax.axvline(0, color="gray", linestyle=":", linewidth=1.0)
+
+    ax.invert_yaxis()
+    ax.set_xlabel("Pore water pressure  $u_w$  [kPa]", fontsize=12)
+    ax.set_ylabel("Vertical depth from surface  [m]", fontsize=12)
+    ax.set_title(
+        "Steady-State Pore Water Pressure  —  Ng et al. (2015) Eq. (19)\n"
+        f"$\\phi$ = {np.degrees(phi):.0f}°,  "
+        f"$\\alpha$ = {alpha} m⁻¹,  "
+        f"$k_s$ = {ks:.2e} m/s,  "
+        f"$T$ = {T*86400*1e3:.4f} mm/day",
+        fontsize=11
+    )
+    ax.legend(fontsize=10, loc="lower left")
+    ax.grid(True, linestyle=":", alpha=0.5)
+    plt.tight_layout()
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EXAMPLE  (reproduces parametric Series 2, Case D1 of Ng et al. 2015)
+# ═══════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+
+    # -----------------------------------------------------------------------
+    # INPUT VARIABLES — edit these to match your slope
+    # -----------------------------------------------------------------------
+
+    # Soil properties
+    ks      = 2.2e-6          # saturated hydraulic conductivity  [m/s]
+    alpha   = 1.1             # Gardner desaturation coefficient  [1/m]
+
+    # Geometry
+    phi_deg = 40.0            # slope angle                       [degrees]
+    H0      = 5.0             # vertical depth to water table     [m]
+    L2_vert = 0.30            # vertical root zone depth          [m]  (30 cm)
+    L1_vert = H0 - L2_vert   # vertical non-rooted zone depth    [m]  (4.70 m)
+
+    # Boundary conditions
+    psi_0   = 0.0             # pressure head at water table      [m]
+    q0      = 0.0             # steady-state surface flux         [m/s] (0 = no-flux)
+
+    # Vegetation
+    T_mmday = 6.6             # transpiration rate                [mm/day]
+    T       = T_mmday * 1e-3 / 86400.0   # convert to             [m/s]
+
+    # Fluid
+    gamma_w = 10.0            # unit weight of water              [kN/m³]
+
+    # Root architectures to evaluate
+    archs   = ["triangular", "parabolic"]
+
+    # -----------------------------------------------------------------------
+    # Derived z* geometry (z* = vertical depth for infinite slope)
+    # -----------------------------------------------------------------------
+    phi   = np.radians(phi_deg)
+    L_star  = H0       # L* = H0  (total z* depth)
+    L1_star = L1_vert  # z* at base of root zone
+    L2_star = L2_vert  # z* thickness of root zone
+
+    # Perpendicular equivalents (for reference)
+    cos_phi = np.cos(phi)
+    L1_perp = L1_star / cos_phi
+    L2_perp = L2_star / cos_phi
+
+    # -----------------------------------------------------------------------
+    # Print parameter summary
+    # -----------------------------------------------------------------------
+    print("=" * 62)
+    print("  Ng et al. (2015) Eq. (19) — Steady-State Pore Water Pressure")
+    print("=" * 62)
+    print(f"  Soil")
+    print(f"    ks          = {ks:.2e} m/s")
+    print(f"    alpha       = {alpha} m⁻¹")
+    print(f"  Geometry")
+    print(f"    phi         = {phi_deg:.1f}°  (cos(phi) = {cos_phi:.4f})")
+    print(f"    H0          = {H0} m  →  L* = {L_star} m")
+    print(f"    L1_vert     = {L1_vert:.2f} m  (non-rooted zone, vertical)")
+    print(f"    L2_vert     = {L2_vert:.2f} m  (root zone, vertical = {L2_vert*100:.0f} cm)")
+    print(f"    L1'         = {L1_perp:.4f} m  (perpendicular)")
+    print(f"    L2'         = {L2_perp:.4f} m  (perpendicular)")
+    print(f"  Boundary conditions")
+    print(f"    psi_0       = {psi_0} m  (water table BC)")
+    print(f"    q0          = {q0} m/s  (surface flux, 0 = no-flux)")
+    print(f"  Vegetation")
+    print(f"    T           = {T_mmday} mm/day = {T:.4e} m/s")
+    print(f"    T/ks        = {T/ks:.5f}")
+    print(f"    exp(alpha*L*) = {np.exp(alpha*L_star):.1f}  (amplification factor)")
+    print()
+
+    # T/ks validity check
+    if T / ks > 0.01:
+        print(f"  ⚠  WARNING: T/ks = {T/ks:.4f} > 0.01. k0* may go negative near")
+        print(f"     the surface for deep slopes (large alpha*L*). Check for NaN.")
+        print()
+
+    # -----------------------------------------------------------------------
+    # Tabulate uw vs depth from surface
+    # -----------------------------------------------------------------------
+    depths = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30,  # inside root zone
+              0.50, 1.0, 2.0, 3.0, 4.0, 5.0]             # outside root zone
+
+    header = f"  {'Depth (m)':>10}  {'z* (m)':>8}" + \
+             "".join(f"  {a.capitalize():>14}" for a in archs) + \
+             f"  {'No vegetation':>14}"
+    print(header)
+    print("  " + "─" * (len(header) - 2))
+
+    for d in depths:
+        zs = np.clip(H0 - d, 0.0, H0)   # z* = H0 - depth_from_surface
+        row = f"  {d:>10.2f}  {zs:>8.2f}"
+        for arch in archs:
+            uw = pore_water_pressure_eq19(
+                zs, H0, L1_vert, L2_vert,
+                alpha, psi_0, q0, ks, phi, T, arch, gamma_w
+            )
+            row += f"  {uw:>14.2f}" if not np.isnan(uw) else f"  {'NaN':>14}"
+        # No-veg baseline (T=0)
+        uw0 = pore_water_pressure_eq19(
+            zs, H0, L1_vert, L2_vert, alpha, psi_0, q0, ks, phi, 0.0,
+            "triangular", gamma_w
+        )
+        row += f"  {uw0:>14.2f}"
+        print(row)
+
+    print()
+    print("  uw values in kPa  |  Negative = suction  |  NaN = model breakdown")
+    print(f"  Root zone occupies depths 0 – {L2_vert*100:.0f} cm from surface")
+
+    # -----------------------------------------------------------------------
+    # Plot
+    # -----------------------------------------------------------------------
+    fig = plot_profiles(H0, L1_vert, L2_vert, alpha, psi_0, q0, ks, phi, T,
+                        architectures=archs, gamma_w=gamma_w, n_points=100)
+    outpath = "ng2015_eq19_pore_pressure.png"
+    fig.savefig(outpath, dpi=150, bbox_inches="tight")
+    print(f"\n  Plot saved to {outpath}")
