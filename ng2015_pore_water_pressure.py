@@ -621,6 +621,6 @@ if __name__ == "__main__":
     # -----------------------------------------------------------------------
     fig = plot_profiles(H0, L1_vert, L2_vert, alpha, psi_0, q0, ks, phi, T,
                         architectures=archs, gamma_w=gamma_w, n_points=100)
-    outpath = "/mnt/user-data/outputs/ng2015_eq19_pore_pressure.png"
+    outpath = "ng2015_eq19_pore_pressure.png"
     fig.savefig(outpath, dpi=150, bbox_inches="tight")
     print(f"\n  Plot saved to {outpath}")
