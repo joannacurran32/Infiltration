@@ -23,6 +23,18 @@ import os
 import warnings
 import numpy as np
 
+# ─── Check for interactive terminal ──────────────────────────────────────────
+if not sys.stdin.isatty():
+    print()
+    print("  This script requires an interactive terminal.")
+    print()
+    print("  In VSCode:  open the integrated terminal  (Ctrl+` or View > Terminal)")
+    print("  then run:   python run_pore_pressure.py")
+    print()
+    print("  The Run button does not work because the script uses input() prompts.")
+    print()
+    sys.exit(0)
+
 # ─── Import steady-state model ───────────────────────────────────────────────
 try:
     from ng2015_eq19_pore_pressure import (
