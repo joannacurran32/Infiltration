@@ -120,6 +120,8 @@ NUMERICAL NOTE
 
 import numpy as np
 from scipy.integrate import quad
+import matplotlib
+matplotlib.use("Agg")          # non-interactive backend — avoids Qt/Tk dependency
 import matplotlib.pyplot as plt
 import warnings
 

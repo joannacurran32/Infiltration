@@ -37,6 +37,8 @@ Reference
 import numpy as np
 from scipy.integrate import quad
 from scipy.optimize import brentq
+import matplotlib
+matplotlib.use("Agg")          # non-interactive backend — avoids Qt/Tk dependency
 import matplotlib.pyplot as plt
 import warnings
 
